@@ -303,14 +303,20 @@ db.grantRolesToUser("empleado_centro01", [
 
 ### Requisitos
 
-- MongoDB 6.0 o superior (necesario para `$dateSubtract`), configurado como **replica set**.
-- [`mongosh`](https://www.mongodb.com/docs/mongodb-shell/).
+- MongoDB **5.0** (necesario para `$dateSubtract`), configurado como **replica set** para soportar transacciones.
+- El shell clásico **`mongo`** (incluido en MongoDB 5.0).
+
+> **Compatibilidad:** los scripts están escritos para el shell clásico `mongo`, que guarda
+> todos los números como `double`, y usa la API de sesiones de ese shell. Con `mongosh`
+> (MongoDB 6+) fallan dos cosas:
+> - `test_dataset.js`: `tarifa_por_hora` se inserta como entero y el esquema exige `double`.
+> - `transactions.js`: `mongosh` no acepta la opción `{ session: session }` en los métodos de colección.
 
 ### Opción rápida con Docker
 
 ```bash
-docker run -d --name campus-parking -p 27017:27017 mongo:7 --replSet rs0
-docker exec campus-parking mongosh --quiet --eval "rs.initiate()"
+docker run -d --name campus-parking -p 27017:27017 mongo:5 --replSet rs0
+docker exec campus-parking mongo --quiet --eval "rs.initiate()"
 ```
 
 ### Orden de ejecución de los scripts
@@ -318,15 +324,27 @@ docker exec campus-parking mongosh --quiet --eval "rs.initiate()"
 ```bash
 git clone https://github.com/IkerDahinten2/proyecto-mongodbii-ikerdahinten.git
 cd proyecto-mongodbii-ikerdahinten
-mongosh "mongodb://localhost:27017/campus_parking" --file db_config.js
-mongosh "mongodb://localhost:27017/campus_parking" --file test_dataset.js
-mongosh "mongodb://localhost:27017/campus_parking" --file aggregations.js
-mongosh "mongodb://localhost:27017/campus_parking" --file transactions.js
-mongosh "mongodb://localhost:27017/campus_parking"
+mongo campus_parking db_config.js
+mongo campus_parking test_dataset.js
+mongo campus_parking aggregations.js
+mongo campus_parking transactions.js
 ```
 
 `roles.js` usa `passwordPrompt()` para pedir las contraseñas de forma segura,
-así que debe ejecutarse desde una sesión interactiva de `mongosh` con `load("roles.js")`.
+así que debe ejecutarse desde una sesión interactiva (`mongo campus_parking`) con `load("roles.js")`.
+
+### Pruebas realizadas
+
+Los scripts se ejecutaron en orden sobre MongoDB 5.0 (replica set en Docker):
+
+| Verificación | Resultado |
+|--------------|-----------|
+| Colecciones y esquemas (`db_config.js`) | ✅ Sin errores |
+| Datos de prueba | ✅ 3 sedes, 15 zonas, 26 usuarios, 30 vehículos, 50 parqueos |
+| Validación `$jsonSchema` | ✅ Rechaza documentos incompletos |
+| 8 agregaciones | ✅ Todas ejecutan y devuelven resultados coherentes |
+| Transacción | ✅ Inserta el parqueo y descuenta 1 cupo de la zona |
+| Roles y usuarios | ✅ Se crean los 3 roles y los 3 usuarios |
 
 | Script | Función |
 |--------|---------|
