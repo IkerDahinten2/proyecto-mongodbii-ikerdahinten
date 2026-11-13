@@ -1,36 +1,71 @@
-// Se abre la sesion para la transaccion
-session = db.getMongo().startSession();
-session.startTransaction();
+// Registro del ingreso de un vehiculo como transaccion multi-documento.
+// Se resta un cupo de la zona y se inserta el ticket del parqueo: o se
+// aplican las dos operaciones o ninguna.
+//
+// Compatible con el shell clasico mongo y con mongosh: las operaciones se
+// hacen sobre session.getDatabase(), que ya esta ligada a la sesion, en vez
+// de pasar { session } como opcion (mongosh no acepta esa opcion).
 
-// Se consulta la zona antes de tocarla
-db.zonas.find({ _id: ObjectId("650000000000000000000201") });
+function registrarIngreso(vehiculoId, zonaId) {
+  var session = db.getMongo().startSession();
+  var sdb = session.getDatabase(db.getName());
 
-// Se resta un cupo de la zona
-session.getDatabase(db.getName()).zonas.updateOne(
-  { _id: ObjectId("650000000000000000000201") },
-  { $inc: { cupos_disponibles: NumberInt(-1) } },
-  { session: session }
-);
+  session.startTransaction();
+  try {
+    var zona = sdb.zonas.findOne({ _id: zonaId });
+    if (!zona) throw new Error("La zona no existe");
 
-// Se guarda el ticket del vehiculo que entro
-session.getDatabase(db.getName()).parqueos.insertOne(
-  {
-    vehiculo_id: ObjectId("650000000000000000000401"),
-    zona_id: ObjectId("650000000000000000000201"),
-    sede_id: ObjectId("650000000000000000000101"),
-    hora_entrada: new Date(),
-    hora_salida: null,
-    estado: "Activo",
-    tiempo_total_minutos: null,
-    costo_total: null
-  },
-  { session: session }
-);
+    var vehiculo = sdb.vehiculos.findOne({ _id: vehiculoId });
+    if (!vehiculo) throw new Error("El vehiculo no existe");
 
-// Se confirma la transaccion
-session.commitTransaction();
-session.endSession();
+    if (zona.tipos_permitidos.indexOf(vehiculo.tipo) === -1) {
+      throw new Error("La zona " + zona.codigo + " no permite vehiculos tipo " + vehiculo.tipo);
+    }
 
-// Se consulta como quedo la zona y el parqueo despues de la transaccion
-db.zonas.find({ _id: ObjectId("650000000000000000000201") });
-db.parqueos.find({ vehiculo_id: ObjectId("650000000000000000000401"), estado: "Activo" });
+    // Un vehiculo no puede estar parqueado dos veces al mismo tiempo
+    if (sdb.parqueos.findOne({ vehiculo_id: vehiculoId, estado: "Activo" })) {
+      throw new Error("El vehiculo " + vehiculo.placa + " ya tiene un parqueo activo");
+    }
+
+    // El filtro cupos_disponibles > 0 evita el sobrecupo: si la zona esta
+    // llena no coincide ningun documento y no se descuenta nada
+    var resultado = sdb.zonas.updateOne(
+      { _id: zonaId, cupos_disponibles: { $gt: 0 } },
+      { $inc: { cupos_disponibles: NumberInt(-1) } }
+    );
+    if (resultado.matchedCount === 0) {
+      throw new Error("La zona " + zona.codigo + " no tiene cupos disponibles");
+    }
+
+    var ticket = sdb.parqueos.insertOne({
+      vehiculo_id: vehiculoId,
+      zona_id: zonaId,
+      sede_id: zona.sede_id,
+      hora_entrada: new Date(),
+      hora_salida: null,
+      estado: "Activo",
+      tiempo_total_minutos: null,
+      costo_total: null
+    });
+
+    session.commitTransaction();
+    print("Ingreso registrado. Ticket: " + ticket.insertedId);
+    return ticket.insertedId;
+  } catch (error) {
+    // Se deshace cualquier cambio parcial
+    session.abortTransaction();
+    print("Ingreso rechazado: " + error.message);
+    return null;
+  } finally {
+    session.endSession();
+  }
+}
+
+// Ejemplo: se registra el ingreso del vehiculo P100009 (Carro, sin parqueo
+// activo) en la zona Z1 de la sede Centro
+var VEHICULO = ObjectId("650000000000000000000409");
+var ZONA = ObjectId("650000000000000000000201");
+
+print("Cupos antes: " + db.zonas.findOne({ _id: ZONA }).cupos_disponibles);
+registrarIngreso(VEHICULO, ZONA);
+print("Cupos despues: " + db.zonas.findOne({ _id: ZONA }).cupos_disponibles);
