@@ -127,11 +127,14 @@ consistencia de cada parte del dominio.
 - **`sedes`**: exige `nombre`, `ciudad` y `direccion`, todos strings simples.
 - **`zonas`**: exige `sede_id`, `codigo`, `capacidad_maxima`,
   `cupos_disponibles`, `tipos_permitidos` y `tarifa_por_hora`. Se valida que
-  `capacidad_maxima` sea al menos 1, `cupos_disponibles` no sea negativo, y
-  `tipos_permitidos` sea un arreglo con al menos un valor válido.
+  `capacidad_maxima` sea al menos 1, `cupos_disponibles` no sea negativo,
+  `tipos_permitidos` sea un arreglo con al menos un valor válido y
+  `tarifa_por_hora` sea un número no negativo (`bsonType: "number"`, que acepta
+  enteros y decimales sin depender del shell que inserte el dato).
 - **`parqueos`**: exige `vehiculo_id`, `zona_id`, `sede_id`, `hora_entrada` y
   `estado`. Los campos `hora_salida`, `tiempo_total_minutos` y `costo_total`
-  aceptan `null` porque un parqueo "Activo" todavía no los tiene definidos.
+  aceptan `null` porque un parqueo "Activo" todavía no los tiene definidos;
+  `costo_total` también usa `bsonType: "number"`.
 
 ### 3.4 Índices creados y su justificación técnica
 
@@ -169,6 +172,12 @@ del esquema.
 | `usuarios` | 26 | 1 administrador, 10 empleados repartidos entre sedes y 15 clientes |
 | `vehiculos` | 30 | Los 4 tipos (Carro, Moto, Bicicleta, Camión), cada uno ligado a un cliente |
 | `parqueos` | 50 | 8 **Activos** (sin salida) y 42 **Finalizados** con tiempo y costo calculados según la tarifa de su zona |
+
+Las fechas de los parqueos se escriben fijas y, después de insertarlas, se
+**desplazan** con un `updateMany` de pipeline para que el ingreso más reciente
+quede una hora antes del momento de la ejecución. La duración de cada parqueo
+no cambia. Así los reportes de "último mes" y "parqueados actualmente" siempre
+tienen datos, sin importar cuándo se ejecute el script.
 
 Al final del script se ejecutan consultas de verificación (conteos y parqueos
 activos) para comprobar que los datos quedaron cargados correctamente.
@@ -209,16 +218,25 @@ descontar un cupo en `zonas` como una sola unidad atómica.
 
 ### Paso a paso
 
-1. Se abre una sesión (`db.getMongo().startSession()`) y se inicia la
-   transacción (`session.startTransaction()`).
-2. Se consulta el estado de la zona antes del cambio.
-3. Se descuenta un cupo con `$inc: { cupos_disponibles: NumberInt(-1) }`
-   dentro de la sesión.
-4. Se inserta el documento del parqueo en estado `"Activo"` dentro de la
-   misma sesión.
-5. `session.commitTransaction()` confirma ambas operaciones juntas y
-   `session.endSession()` cierra la sesión.
-6. Se consulta la zona y el parqueo para verificar el resultado.
+La lógica está en la función `registrarIngreso(vehiculoId, zonaId)`, reutilizable
+para cualquier vehículo y zona:
+
+1. Se abre una sesión y se inicia la transacción. Todas las operaciones se hacen
+   sobre `session.getDatabase()`, que queda ligada a la sesión; esto funciona igual
+   en el shell clásico `mongo` y en `mongosh`.
+2. **Validaciones de negocio** dentro de la transacción:
+   - la zona y el vehículo existen;
+   - el tipo del vehículo está en los `tipos_permitidos` de la zona;
+   - el vehículo no tiene otro parqueo **activo**.
+3. **Descuento del cupo** con `updateOne` y el filtro
+   `{ _id: zonaId, cupos_disponibles: { $gt: 0 } }`. Si la zona está llena, el
+   filtro no coincide con ningún documento: se revisa `matchedCount` y se lanza un
+   error, así nunca hay sobrecupo.
+4. **Inserción del ticket** en `parqueos` con estado `"Activo"`.
+5. `session.commitTransaction()` confirma las dos operaciones juntas.
+6. **Rollback**: si cualquier paso falla, el `catch` ejecuta
+   `session.abortTransaction()` y no queda ningún cambio parcial. El `finally`
+   cierra la sesión.
 
 > Las transacciones multi-documento requieren que MongoDB se ejecute como
 > **replica set** (ver sección 9).
@@ -261,11 +279,10 @@ db.createUser({
   pwd: passwordPrompt(),
   roles: [{ role: "empleado_de_sede", db: "campus_parking" }]
 });
-
-db.grantRolesToUser("empleado_centro01", [
-  { role: "empleado_de_sede", db: "campus_parking" }
-]);
 ```
+
+`roles.js` se puede ejecutar varias veces: si un rol o usuario ya existe, lo
+vuelve a crear con la definición actual en lugar de fallar.
 
 ---
 
@@ -303,20 +320,15 @@ db.grantRolesToUser("empleado_centro01", [
 
 ### Requisitos
 
-- MongoDB **5.0** (necesario para `$dateSubtract`), configurado como **replica set** para soportar transacciones.
-- El shell clásico **`mongo`** (incluido en MongoDB 5.0).
-
-> **Compatibilidad:** los scripts están escritos para el shell clásico `mongo`, que guarda
-> todos los números como `double`, y usa la API de sesiones de ese shell. Con `mongosh`
-> (MongoDB 6+) fallan dos cosas:
-> - `test_dataset.js`: `tarifa_por_hora` se inserta como entero y el esquema exige `double`.
-> - `transactions.js`: `mongosh` no acepta la opción `{ session: session }` en los métodos de colección.
+- MongoDB **5.0 o superior** (necesario para `$dateSubtract`), configurado como
+  **replica set** para soportar transacciones.
+- `mongosh` o el shell clásico `mongo`: los scripts funcionan en ambos.
 
 ### Opción rápida con Docker
 
 ```bash
-docker run -d --name campus-parking -p 27017:27017 mongo:5 --replSet rs0
-docker exec campus-parking mongo --quiet --eval "rs.initiate()"
+docker run -d --name campus-parking -p 27017:27017 mongo:7 --replSet rs0
+docker exec campus-parking mongosh --quiet --eval "rs.initiate()"
 ```
 
 ### Orden de ejecución de los scripts
@@ -324,27 +336,34 @@ docker exec campus-parking mongo --quiet --eval "rs.initiate()"
 ```bash
 git clone https://github.com/IkerDahinten2/proyecto-mongodbii-ikerdahinten.git
 cd proyecto-mongodbii-ikerdahinten
-mongo campus_parking db_config.js
-mongo campus_parking test_dataset.js
-mongo campus_parking aggregations.js
-mongo campus_parking transactions.js
+mongosh "mongodb://localhost:27017/campus_parking" --file db_config.js
+mongosh "mongodb://localhost:27017/campus_parking" --file test_dataset.js
+mongosh "mongodb://localhost:27017/campus_parking" --file aggregations.js
+mongosh "mongodb://localhost:27017/campus_parking" --file transactions.js
 ```
 
-`roles.js` usa `passwordPrompt()` para pedir las contraseñas de forma segura,
-así que debe ejecutarse desde una sesión interactiva (`mongo campus_parking`) con `load("roles.js")`.
+`roles.js` usa `passwordPrompt()` para pedir las contraseñas de forma segura, así
+que debe ejecutarse desde una sesión interactiva con `load("roles.js")`.
 
 ### Pruebas realizadas
 
-Los scripts se ejecutaron en orden sobre MongoDB 5.0 (replica set en Docker):
+Los scripts se ejecutaron en **MongoDB 5.0 con `mongo`** y en **MongoDB 7.0 con
+`mongosh`**, ambos como replica set **con autenticación activada**:
 
 | Verificación | Resultado |
 |--------------|-----------|
-| Colecciones y esquemas (`db_config.js`) | ✅ Sin errores |
+| Colecciones, esquemas e índices | ✅ Sin errores en ambos shells |
 | Datos de prueba | ✅ 3 sedes, 15 zonas, 26 usuarios, 30 vehículos, 50 parqueos |
-| Validación `$jsonSchema` | ✅ Rechaza documentos incompletos |
-| 8 agregaciones | ✅ Todas ejecutan y devuelven resultados coherentes |
-| Transacción | ✅ Inserta el parqueo y descuenta 1 cupo de la zona |
-| Roles y usuarios | ✅ Se crean los 3 roles y los 3 usuarios |
+| Fechas relativas | ✅ Ingreso más reciente hace 1 hora; ninguna salida anterior a su entrada |
+| 8 agregaciones | ✅ Todas devuelven resultados (la del último mes ya no queda vacía) |
+| Transacción con vehículo libre | ✅ Registra el ticket y el cupo baja de 18 a 17 |
+| Vehículo ya parqueado | ✅ Rechazado sin cambios |
+| Zona llena | ✅ Rechazado: el cupo no queda negativo y no se crea el ticket |
+| Tipo de vehículo no permitido | ✅ Rechazado |
+| `roles.js` ejecutado dos veces | ✅ Sin errores; 3 roles y 3 usuarios |
+| Cliente intenta insertar | ✅ Bloqueado por permisos (`Unauthorized`) |
+| Empleado intenta borrar usuarios | ✅ Bloqueado por permisos |
+| Empleado actualiza cupos de zonas | ✅ Permitido |
 
 | Script | Función |
 |--------|---------|

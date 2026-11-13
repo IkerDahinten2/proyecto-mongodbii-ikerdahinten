@@ -106,7 +106,9 @@ db.createCollection("zonas", {
           minItems: 1,
           items: { enum: ["Carro", "Moto", "Bicicleta", "Camion"] }
         },
-        tarifa_por_hora: { bsonType: "double", minimum: 0.0 }
+        // "number" acepta int, long, double y decimal: el shell clasico mongo guarda
+        // los numeros como double, pero mongosh guarda 8 como int y el esquema lo rechazaba
+        tarifa_por_hora: { bsonType: "number", minimum: 0 }
       }
     }
   }
@@ -136,7 +138,7 @@ db.createCollection("parqueos", {
         hora_salida: { bsonType: ["date", "null"] },
         estado: { enum: ["Activo", "Finalizado"] },
         tiempo_total_minutos: { bsonType: ["int", "null"], minimum: 0 },
-        costo_total: { bsonType: ["double", "null"], minimum: 0.0 }
+        costo_total: { bsonType: ["number", "null"], minimum: 0 }
       }
     }
   }
