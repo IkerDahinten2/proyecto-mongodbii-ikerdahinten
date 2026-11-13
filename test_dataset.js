@@ -184,6 +184,24 @@ db.parqueos.insertMany([
   { vehiculo_id: ObjectId("650000000000000000000419"), zona_id: ObjectId("650000000000000000000204"), sede_id: ObjectId("650000000000000000000101"), hora_entrada: ISODate("2026-07-11T08:30:00Z"), hora_salida: ISODate("2026-07-11T13:30:00Z"), estado: "Finalizado", tiempo_total_minutos: NumberInt(300), costo_total: 10.00 },
   { vehiculo_id: ObjectId("650000000000000000000420"), zona_id: ObjectId("650000000000000000000207"), sede_id: ObjectId("650000000000000000000102"), hora_entrada: ISODate("2026-07-12T09:30:00Z"), hora_salida: ISODate("2026-07-12T14:30:00Z"), estado: "Finalizado", tiempo_total_minutos: NumberInt(300), costo_total: 50.00 }
 ]);
+// Las fechas de arriba son fijas (julio de 2026). Para que los reportes de
+// "ultimo mes" y de "vehiculos parqueados actualmente" tengan datos sin
+// importar cuando se ejecute el script, se desplazan todos los parqueos para
+// que el ingreso mas reciente quede una hora antes del momento actual.
+// La duracion de cada parqueo no cambia: entrada y salida se mueven igual.
+var ultimoIngreso = db.parqueos.find().sort({ hora_entrada: -1 }).limit(1).next().hora_entrada;
+var desfaseMs = Date.now() - 60 * 60 * 1000 - ultimoIngreso.getTime();
+db.parqueos.updateMany({}, [
+  {
+    $set: {
+      hora_entrada: { $add: ["$hora_entrada", desfaseMs] },
+      hora_salida: {
+        $cond: [{ $eq: ["$hora_salida", null] }, null, { $add: ["$hora_salida", desfaseMs] }]
+      }
+    }
+  }
+]);
+
 // Se verifica que si haya quedado el total correcto y que los 8 activos
 // si esten marcados como tal (no es una suposicion, es una consulta real)
 db.parqueos.find();

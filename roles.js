@@ -1,5 +1,18 @@
+// El script se puede ejecutar varias veces: si un rol o usuario ya existe,
+// se elimina y se vuelve a crear con la definicion actual (createRole y
+// createUser fallan si el nombre ya existe)
+function recrearRol(definicion) {
+  if (db.getRole(definicion.role)) db.dropRole(definicion.role);
+  db.createRole(definicion);
+}
+
+function recrearUsuario(definicion) {
+  if (db.getUser(definicion.user)) db.dropUser(definicion.user);
+  db.createUser(definicion);
+}
+
 // Se crea el rol del administrador, acceso total
-db.createRole({
+recrearRol({
   role: "administrador_total",
   privileges: [
     {
@@ -16,7 +29,7 @@ db.createRole({
 // Nota: mongo no deja restringir por documento, solo por coleccion. Que un
 // empleado solo vea SU sede se controla desde el backend agregando siempre
 // el filtro sede_id en la consulta, no lo hace mongo solo
-db.createRole({
+recrearRol({
   role: "empleado_de_sede",
   privileges: [
     { resource: { db: "campus_parking", collection: "usuarios" }, actions: ["find"] },
@@ -29,7 +42,7 @@ db.createRole({
 });
 
 // Se crea el rol del cliente, solo lectura
-db.createRole({
+recrearRol({
   role: "cliente_final",
   privileges: [
     { resource: { db: "campus_parking", collection: "usuarios" }, actions: ["find"] },
@@ -42,28 +55,23 @@ db.createRole({
 });
 
 // Se crean los usuarios de prueba con cada rol
-db.createUser({
+recrearUsuario({
   user: "admin_andrea",
   pwd: passwordPrompt(),
   roles: [{ role: "administrador_total", db: "campus_parking" }]
 });
 
-db.createUser({
+recrearUsuario({
   user: "empleado_centro01",
   pwd: passwordPrompt(),
   roles: [{ role: "empleado_de_sede", db: "campus_parking" }]
 });
 
-db.createUser({
+recrearUsuario({
   user: "cliente_jose",
   pwd: passwordPrompt(),
   roles: [{ role: "cliente_final", db: "campus_parking" }]
 });
-
-// Se le asigna el rol de empleado a un usuario que ya existia
-db.grantRolesToUser("empleado_centro01", [
-  { role: "empleado_de_sede", db: "campus_parking" }
-]);
 
 // Se consulta que si hayan quedado creados los roles y los usuarios
 db.getRoles();
